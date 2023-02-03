@@ -260,7 +260,7 @@ export default class BufferController implements ComponentAPI {
             '$1'
           );
           if (currentCodec !== nextCodec) {
-            const mimeType = `${container};codecs=${levelCodec || codec}`;
+            const mimeType = `${container};codecs=${(levelCodec || codec).toLowerCase()}`;
             this.appendChangeType(trackName, mimeType);
             logger.log(
               `[buffer-controller]: switching codec ${currentCodec} to ${nextCodec}`
@@ -746,7 +746,7 @@ export default class BufferController implements ComponentAPI {
         }
         // use levelCodec as first priority
         const codec = track.levelCodec || track.codec;
-        const mimeType = `${track.container};codecs=${codec}`;
+        const mimeType = `${track.container};codecs=${codec?.toLowerCase()}`;
         logger.log(`[buffer-controller]: creating sourceBuffer(${mimeType})`);
         try {
           const sb = (sourceBuffer[trackName] =

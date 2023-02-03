@@ -75,11 +75,11 @@ export type CodecType = 'audio' | 'video';
 
 export function isCodecType(codec: string, type: CodecType): boolean {
   const typeCodes = sampleEntryCodesISO[type];
-  return !!typeCodes && typeCodes[codec.slice(0, 4)] === true;
+  return !!typeCodes && typeCodes[codec.slice(0, 4).toLowerCase()] === true;
 }
 
 export function isCodecSupportedInMp4(codec: string, type: CodecType): boolean {
   return MediaSource.isTypeSupported(
-    `${type || 'video'}/mp4;codecs="${codec}"`
+    `${type || 'video'}/mp4;codecs="${codec.toLowerCase()}"`
   );
 }
