@@ -33,7 +33,12 @@ describe('StreamController', function () {
 
   beforeEach(function () {
     fake = sinon.useFakeXMLHttpRequest();
-    hls = new Hls({});
+    hls = new Hls({
+      // Enable debug to catch callback errors and enable logging in these tests:
+      // debug: true,
+      startFragPrefetch: true,
+      enableWorker: false,
+    });
     streamController = hls['streamController'];
     fragmentTracker = streamController['fragmentTracker'];
     streamController['startFragRequested'] = true;
@@ -41,6 +46,7 @@ describe('StreamController', function () {
 
   this.afterEach(function () {
     fake.restore();
+    hls.destroy();
   });
 
   const assertStreamControllerStarted = (streamController) => {
@@ -437,6 +443,7 @@ describe('StreamController', function () {
       // @ts-ignore
       streamController.gapController = {
         poll: function () {},
+        destroy: function () {},
       };
       streamController['media'] = {
         buffered: {

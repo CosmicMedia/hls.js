@@ -99,13 +99,14 @@ class TSDemuxer implements Demuxer {
   }
 
   static syncOffset(data: Uint8Array): number {
+    const length = data.length;
     const scanwindow =
       Math.min(PACKET_LENGTH * 5, data.length - PACKET_LENGTH) + 1;
     let i = 0;
     while (i < scanwindow) {
       // a TS init segment should contain at least 2 TS packets: PAT and PMT, each starting with 0x47
       let foundPat = false;
-      for (let j = 0; j < scanwindow; j += PACKET_LENGTH) {
+      for (let j = i; j < length; j += PACKET_LENGTH) {
         if (data[j] === 0x47) {
           if (!foundPat && parsePID(data, j) === 0) {
             foundPat = true;
@@ -353,7 +354,9 @@ class TSDemuxer implements Demuxer {
             }
 
             if (unknownPID !== null && !pmtParsed) {
-              logger.log(`unknown PID '${unknownPID}' in TS found`);
+              logger.warn(
+                `MPEG-TS PMT found at ${start} after unknown PID '${unknownPID}'. Backtracking to sync byte @${syncOffset} to parse all TS packets.`
+              );
               unknownPID = null;
               // we set it to -188, the += 188 in the for loop will reset start to 0
               start = syncOffset - 188;
@@ -374,11 +377,15 @@ class TSDemuxer implements Demuxer {
     }
 
     if (tsPacketErrors > 0) {
+      const error = new Error(
+        `Found ${tsPacketErrors} TS packet/s that do not start with 0x47`
+      );
       this.observer.emit(Events.ERROR, Events.ERROR, {
         type: ErrorTypes.MEDIA_ERROR,
         details: ErrorDetails.FRAG_PARSING_ERROR,
         fatal: false,
-        reason: `Found ${tsPacketErrors} TS packet/s that do not start with 0x47`,
+        error,
+        reason: error.message,
       });
     }
 
@@ -622,15 +629,15 @@ class TSDemuxer implements Demuxer {
           }
 
           if (!track.sps) {
-            const expGolombDecoder = new ExpGolomb(unit.data);
+            const sps = unit.data;
+            const expGolombDecoder = new ExpGolomb(sps);
             const config = expGolombDecoder.readSPS();
             track.width = config.width;
             track.height = config.height;
             track.pixelRatio = config.pixelRatio;
-            // TODO: `track.sps` is defined as a `number[]`, but we're setting it to a `Uint8Array[]`.
-            track.sps = [unit.data] as any;
+            track.sps = [sps];
             track.duration = this._duration;
-            const codecarray = unit.data.subarray(1, 4);
+            const codecarray = sps.subarray(1, 4);
             let codecstring = 'avc1.';
             for (let i = 0; i < 3; i++) {
               let h = codecarray[i].toString(16);
@@ -651,8 +658,7 @@ class TSDemuxer implements Demuxer {
           }
 
           if (!track.pps) {
-            // TODO: `track.pss` is defined as a `number[]`, but we're setting it to a `Uint8Array[]`.
-            track.pps = [unit.data] as any;
+            track.pps = [unit.data];
           }
 
           break;
@@ -868,23 +874,24 @@ class TSDemuxer implements Demuxer {
     }
     // if ADTS header does not start straight from the beginning of the PES payload, raise an error
     if (offset !== startOffset) {
-      let reason;
-      let fatal;
-      if (offset < len - 1) {
+      let reason: string;
+      const recoverable = offset < len - 1;
+      if (recoverable) {
         reason = `AAC PES did not start with ADTS header,offset:${offset}`;
-        fatal = false;
       } else {
-        reason = 'no ADTS header found in AAC PES';
-        fatal = true;
+        reason = 'No ADTS header found in AAC PES';
       }
-      logger.warn(`parsing error:${reason}`);
+      const error = new Error(reason);
+      logger.warn(`parsing error: ${reason}`);
       this.observer.emit(Events.ERROR, Events.ERROR, {
         type: ErrorTypes.MEDIA_ERROR,
         details: ErrorDetails.FRAG_PARSING_ERROR,
-        fatal,
+        fatal: false,
+        levelRetry: recoverable,
+        error,
         reason,
       });
-      if (fatal) {
+      if (!recoverable) {
         return;
       }
     }

@@ -12,6 +12,7 @@ import { enableStreamingMode, hlsDefaultConfig, mergeConfig } from './config';
 import { EventEmitter } from 'eventemitter3';
 import { Events } from './events';
 import { ErrorTypes, ErrorDetails } from './errors';
+import { HdcpLevels } from './types/level';
 import type { HlsEventEmitter, HlsListeners } from './events';
 import type AudioTrackController from './controller/audio-track-controller';
 import type AbrController from './controller/abr-controller';
@@ -23,9 +24,14 @@ import type SubtitleTrackController from './controller/subtitle-track-controller
 import type { ComponentAPI, NetworkComponentAPI } from './types/component-api';
 import type { MediaPlaylist } from './types/media-playlist';
 import type { HlsConfig } from './config';
-import { HdcpLevel, HdcpLevels, Level } from './types/level';
-import type { Fragment } from './loader/fragment';
+import type { HdcpLevel, Level } from './types/level';
 import type { BufferInfo } from './utils/buffer-helper';
+import type AudioStreamController from './controller/audio-stream-controller';
+import type BasePlaylistController from './controller/base-playlist-controller';
+import type BaseStreamController from './controller/base-stream-controller';
+import type ContentSteeringController from './controller/content-steering-controller';
+import type ErrorController from './controller/error-controller';
+import type FPSController from './controller/fps-controller';
 
 /**
  * The `Hls` class is the core of the HLS.js library used to instantiate player instances.
@@ -111,9 +117,9 @@ export default class Hls implements HlsEventEmitter {
    * @param userConfig - Configuration options applied over `Hls.DefaultConfig`
    */
   constructor(userConfig: Partial<HlsConfig> = {}) {
+    enableLogs(userConfig.debug || false, 'Hls instance');
     const config = (this.config = mergeConfig(Hls.DefaultConfig, userConfig));
     this.userConfig = userConfig;
-    enableLogs(config.debug, 'Hls instance');
 
     this._autoLevelCapping = -1;
 
@@ -126,8 +132,10 @@ export default class Hls implements HlsEventEmitter {
       abrController: ConfigAbrController,
       bufferController: ConfigBufferController,
       capLevelController: ConfigCapLevelController,
+      errorController: ConfigErrorController,
       fpsController: ConfigFpsController,
     } = config;
+    const errorController = new ConfigErrorController(this);
     const abrController = (this.abrController = new ConfigAbrController(this));
     const bufferController = (this.bufferController =
       new ConfigBufferController(this));
@@ -138,8 +146,15 @@ export default class Hls implements HlsEventEmitter {
     const playListLoader = new PlaylistLoader(this);
     const id3TrackController = new ID3TrackController(this);
 
-    // network controllers
-    const levelController = (this.levelController = new LevelController(this));
+    const ConfigContentSteeringController = config.contentSteeringController;
+    // ConentSteeringController is defined before LevelController to receive Multivariant Playlist events first
+    const contentSteering = ConfigContentSteeringController
+      ? new ConfigContentSteeringController(this)
+      : null;
+    const levelController = (this.levelController = new LevelController(
+      this,
+      contentSteering
+    ));
     // FragmentTracker must be defined before StreamController because the order of event handling is important
     const fragmentTracker = new FragmentTracker(this);
     const keyLoader = new KeyLoader(this.config);
@@ -159,6 +174,9 @@ export default class Hls implements HlsEventEmitter {
       levelController,
       streamController,
     ];
+    if (contentSteering) {
+      networkControllers.splice(1, 0, contentSteering);
+    }
 
     this.networkControllers = networkControllers;
     const coreComponents: ComponentAPI[] = [
@@ -206,6 +224,14 @@ export default class Hls implements HlsEventEmitter {
     );
 
     this.coreComponents = coreComponents;
+
+    // Error controller handles errors before and after all other controllers
+    // This listener will be invoked after all other controllers error listeners
+    networkControllers.push(errorController);
+    const onErrorOut = errorController.onErrorOut;
+    if (typeof onErrorOut === 'function') {
+      this.on(Events.ERROR, onErrorOut, errorController);
+    }
   }
 
   createController(ControllerClass, components) {
@@ -311,6 +337,11 @@ export default class Hls implements HlsEventEmitter {
 
     this.coreComponents.forEach((component) => component.destroy());
     this.coreComponents.length = 0;
+    // Remove any references that could be held in config options or callbacks
+    const config = this.config;
+    config.xhrSetup = config.fetchSetup = undefined;
+    // @ts-ignore
+    this.config = this.userConfig = null;
   }
 
   /**
@@ -564,7 +595,7 @@ export default class Hls implements HlsEventEmitter {
   }
 
   /**
-   * get bandwidth estimate
+   * Returns the current bandwidth estimate in bits per second, when available. Otherwise, `NaN` is returned.
    */
   get bandwidthEstimate(): number {
     const { bwEstimator } = this.abrController;
@@ -846,29 +877,57 @@ export type {
   HlsListeners,
   HlsEventEmitter,
   HlsConfig,
-  Fragment,
+  BufferInfo,
+  HdcpLevels,
+  HdcpLevel,
+  AbrController,
+  AudioStreamController,
+  AudioTrackController,
+  BasePlaylistController,
+  BaseStreamController,
+  BufferController,
+  CapLevelController,
+  CMCDController,
+  ContentSteeringController,
+  EMEController,
+  ErrorController,
+  FPSController,
+  SubtitleTrackController,
 };
-
+export type {
+  ComponentAPI,
+  AbrComponentAPI,
+  NetworkComponentAPI,
+} from './types/component-api';
 export type {
   ABRControllerConfig,
   BufferControllerConfig,
   CapLevelControllerConfig,
   CMCDControllerConfig,
   EMEControllerConfig,
+  DRMSystemsConfiguration,
   DRMSystemOptions,
   FPSControllerConfig,
   FragmentLoaderConfig,
   FragmentLoaderConstructor,
+  HlsLoadPolicies,
   LevelControllerConfig,
+  LoaderConfig,
+  LoadPolicy,
   MP4RemuxerConfig,
   PlaylistLoaderConfig,
   PlaylistLoaderConstructor,
+  RetryConfig,
   StreamControllerConfig,
   LatencyControllerConfig,
   MetadataControllerConfig,
   TimelineControllerConfig,
   TSDemuxerConfig,
 } from './config';
+export type { MediaKeySessionContext } from './controller/eme-controller';
+export type { ILogger } from './utils/logger';
+export type { SubtitleStreamController } from './controller/subtitle-stream-controller';
+export type { TimelineController } from './controller/timeline-controller';
 export type { CuesInterface } from './utils/cues';
 export type {
   MediaKeyFunc,
@@ -886,8 +945,6 @@ export type {
   UserdataSample,
 } from './types/demuxer';
 export type {
-  HdcpLevel,
-  HdcpLevels,
   HlsSkip,
   HlsUrlParameters,
   LevelAttributes,
@@ -898,6 +955,7 @@ export type {
   PlaylistLevelType,
   HlsChunkPerformanceTiming,
   HlsPerformanceTiming,
+  HlsProgressivePerformanceTiming,
   PlaylistContextType,
   PlaylistLoaderContext,
   FragmentLoaderContext,
@@ -912,9 +970,9 @@ export type {
   LoaderOnError,
   LoaderOnSuccess,
   LoaderOnTimeout,
-  HlsProgressivePerformanceTiming,
 } from './types/loader';
 export type {
+  MediaAttributes,
   MediaPlaylistType,
   MainPlaylistType,
   AudioPlaylistType,
@@ -924,6 +982,7 @@ export type { Track, TrackSet } from './types/track';
 export type { ChunkMetadata } from './types/transmuxer';
 export type {
   BaseSegment,
+  Fragment,
   Part,
   ElementaryStreams,
   ElementaryStreamTypes,
@@ -969,6 +1028,7 @@ export type {
   LevelSwitchingData,
   LevelUpdatedData,
   LiveBackBufferData,
+  ContentSteeringOptions,
   ManifestLoadedData,
   ManifestLoadingData,
   ManifestParsedData,
@@ -981,5 +1041,9 @@ export type {
   SubtitleTracksUpdatedData,
   SubtitleTrackSwitchData,
 } from './types/events';
+export type {
+  NetworkErrorAction,
+  ErrorActionFlags,
+  IErrorAction,
+} from './controller/error-controller';
 export type { AttrList } from './utils/attr-list';
-export type { BufferInfo } from './utils/buffer-helper';

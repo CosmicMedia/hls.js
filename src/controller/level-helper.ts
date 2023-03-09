@@ -6,37 +6,10 @@ import { logger } from '../utils/logger';
 import { Fragment, Part } from '../loader/fragment';
 import { LevelDetails } from '../loader/level-details';
 import type { Level } from '../types/level';
-import type { MediaPlaylist } from '../types/media-playlist';
 import { DateRange } from '../loader/date-range';
 
 type FragmentIntersection = (oldFrag: Fragment, newFrag: Fragment) => void;
 type PartIntersection = (oldPart: Part, newPart: Part) => void;
-
-export function addGroupId(level: Level, type: string, id: string): void {
-  switch (type) {
-    case 'audio':
-      if (!level.audioGroupIds) {
-        level.audioGroupIds = [];
-      }
-      level.audioGroupIds.push(id);
-      break;
-    case 'text':
-      if (!level.textGroupIds) {
-        level.textGroupIds = [];
-      }
-      level.textGroupIds.push(id);
-      break;
-  }
-}
-
-export function assignTrackIdsByGroup(tracks: MediaPlaylist[]): void {
-  const groups = {};
-  tracks.forEach((track) => {
-    const groupId = track.groupId || '';
-    track.id = groups[groupId] = groups[groupId] || 0;
-    groups[groupId]++;
-  });
-}
 
 export function updatePTS(
   fragments: Fragment[],
@@ -63,9 +36,6 @@ function updateFromToPTS(fragFrom: Fragment, fragTo: Fragment) {
       duration = fragFrom.start - fragToPTS;
       frag = fragTo;
     }
-    // TODO? Drift can go either way, or the playlist could be completely accurate
-    // console.assert(duration > 0,
-    //   `duration of ${duration} computed for frag ${frag.sn}, level ${frag.level}, there should be some duration drift between playlist and fragment!`);
     if (frag.duration !== duration) {
       frag.duration = duration;
     }
@@ -464,7 +434,7 @@ export function getFragmentWithSN(
   sn: number,
   fragCurrent: Fragment | null
 ): Fragment | null {
-  if (!level || !level.details) {
+  if (!level?.details) {
     return null;
   }
   const levelDetails = level.details;
@@ -488,7 +458,7 @@ export function getPartWith(
   sn: number,
   partIndex: number
 ): Part | null {
-  if (!level || !level.details) {
+  if (!level?.details) {
     return null;
   }
   return findPart(level.details?.partList, sn, partIndex);

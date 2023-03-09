@@ -1,3 +1,4 @@
+/* global process:false, __dirname:false */
 const pkgJson = require('./package.json');
 const path = require('path');
 const webpack = require('webpack');
@@ -64,7 +65,12 @@ const baseConfig = {
         options: {
           babelrc: false,
           presets: [
-            '@babel/preset-typescript',
+            [
+              '@babel/preset-typescript',
+              {
+                optimizeConstEnums: true,
+              },
+            ],
             [
               '@babel/preset-env',
               {
@@ -129,6 +135,7 @@ function getAliasesForLightDist() {
     aliases = Object.assign({}, aliases, {
       './controller/eme-controller': './empty.js',
       './utils/mediakeys-helper': './empty.js',
+      '../utils/mediakeys-helper': '../empty.js',
     });
   }
 
@@ -139,7 +146,7 @@ function getAliasesForLightDist() {
   }
 
   if (!addSubtitleSupport) {
-    aliases = Object.assign(aliases, {
+    aliases = Object.assign({}, aliases, {
       './utils/cues': './empty.js',
       './controller/timeline-controller': './empty.js',
       './controller/subtitle-track-controller': './empty.js',
@@ -148,7 +155,7 @@ function getAliasesForLightDist() {
   }
 
   if (!addAltAudioSupport) {
-    aliases = Object.assign(aliases, {
+    aliases = Object.assign({}, aliases, {
       './controller/audio-track-controller': './empty.js',
       './controller/audio-stream-controller': './empty.js',
     });
@@ -157,6 +164,7 @@ function getAliasesForLightDist() {
   if (!addVariableSubstitutionSupport) {
     aliases = Object.assign({}, aliases, {
       './utils/variable-substitution': './empty.js',
+      '../utils/variable-substitution': '../empty.js',
     });
   }
 
@@ -270,8 +278,8 @@ const multiConfig = [
   },
 ].map((config) => {
   const baseClone = merge({}, baseConfig);
-  // Strip console.assert statements from production webpack targets
-  if (config.mode === 'production') {
+  // Strip console.assert statements from build targets
+  if (config.mode === 'production' || env.NETLIFY === 'true') {
     // eslint-disable-next-line no-restricted-properties
     baseClone.module.rules
       .find((rule) => rule.loader === 'babel-loader')

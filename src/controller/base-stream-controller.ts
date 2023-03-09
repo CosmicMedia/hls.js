@@ -29,6 +29,8 @@ import { LevelDetails } from '../loader/level-details';
 import Decrypter from '../crypt/decrypter';
 import TimeRanges from '../utils/time-ranges';
 import { PlaylistLevelType } from '../types/loader';
+import { getRetryDelay } from '../utils/error-helper';
+import { NetworkErrorAction } from './error-controller';
 import type {
   BufferAppendingData,
   ErrorData,
@@ -37,7 +39,6 @@ import type {
   KeyLoadedData,
   MediaAttachingData,
   BufferFlushingData,
-  LevelSwitchingData,
   ManifestLoadedData,
 } from '../types/events';
 import type { FragmentTracker } from './fragment-tracker';
@@ -47,6 +48,7 @@ import type Hls from '../hls';
 import type { HlsConfig } from '../config';
 import type { NetworkComponentAPI } from '../types/component-api';
 import type { SourceBufferName } from '../types/buffer';
+import type { RationalTimestamp } from '../utils/timescale-conversion';
 
 type ResolveFragLoaded = (FragLoadedEndData) => void;
 type RejectFragLoaded = (LoadError) => void;
@@ -86,7 +88,6 @@ export default class BaseStreamController
   protected startPosition: number = 0;
   protected startTimeOffset: number | null = null;
   protected loadedmetadata: boolean = false;
-  protected fragLoadError: number = 0;
   protected retryDate: number = 0;
   protected levels: Array<Level> | null = null;
   protected fragmentLoader: FragmentLoader;
@@ -94,7 +95,7 @@ export default class BaseStreamController
   protected levelLastLoaded: number | null = null;
   protected startFragRequested: boolean = false;
   protected decrypter: Decrypter;
-  protected initPTS: Array<number> = [];
+  protected initPTS: RationalTimestamp[] = [];
   protected onvseeking: EventListener | null = null;
   protected onvended: EventListener | null = null;
 
@@ -119,7 +120,6 @@ export default class BaseStreamController
     this.config = hls.config;
     this.decrypter = new Decrypter(hls.config);
     hls.on(Events.MANIFEST_LOADED, this.onManifestLoaded, this);
-    hls.on(Events.LEVEL_SWITCHING, this.onLevelSwitching, this);
   }
 
   protected doTick() {
@@ -135,7 +135,7 @@ export default class BaseStreamController
     this.fragmentLoader.abort();
     this.keyLoader.abort();
     const frag = this.fragCurrent;
-    if (frag) {
+    if (frag?.loader) {
       frag.abortRequests();
       this.fragmentTracker.removeFragment(frag);
     }
@@ -294,13 +294,6 @@ export default class BaseStreamController
     this.startTimeOffset = data.startTimeOffset;
   }
 
-  protected onLevelSwitching(
-    event: Events.LEVEL_SWITCHING,
-    data: LevelSwitchingData
-  ): void {
-    this.fragLoadError = 0;
-  }
-
   protected onHandlerDestroying() {
     this.stopLoad();
     super.onHandlerDestroying();
@@ -308,7 +301,6 @@ export default class BaseStreamController
 
   protected onHandlerDestroyed() {
     this.state = State.STOPPED;
-    this.hls.off(Events.LEVEL_SWITCHING, this.onLevelSwitching, this);
     if (this.fragmentLoader) {
       this.fragmentLoader.destroy();
     }
@@ -365,7 +357,6 @@ export default class BaseStreamController
           // if we're here we probably needed to backtrack or are waiting for more parts
           return;
         }
-        this.fragLoadError = 0;
         const state = this.state;
         if (this.fragContextChanged(frag)) {
           if (
@@ -406,8 +397,6 @@ export default class BaseStreamController
     // When alternate audio is playing, the audio-stream-controller is responsible for the audio buffer. Otherwise,
     // passing a null type flushes both buffers
     const flushScope: BufferFlushingData = { startOffset, endOffset, type };
-    // Reset load errors on flush
-    this.fragLoadError = 0;
     this.hls.trigger(Events.BUFFER_FLUSHING, flushScope);
   }
 
@@ -435,13 +424,24 @@ export default class BaseStreamController
           decryptData.method === 'AES-128'
         ) {
           const startTime = self.performance.now();
-          // decrypt the subtitles
+          // decrypt init segment data
           return this.decrypter
             .decrypt(
               new Uint8Array(payload),
               decryptData.key.buffer,
               decryptData.iv.buffer
             )
+            .catch((err) => {
+              hls.trigger(Events.ERROR, {
+                type: ErrorTypes.MEDIA_ERROR,
+                details: ErrorDetails.FRAG_DECRYPT_ERROR,
+                fatal: false,
+                error: err,
+                reason: err.message,
+                frag,
+              });
+              throw err;
+            })
             .then((decryptedData) => {
               const endTime = self.performance.now();
               hls.trigger(Events.FRAG_DECRYPTED, {
@@ -468,7 +468,7 @@ export default class BaseStreamController
 
         const stats = frag.stats;
         this.state = State.IDLE;
-        this.fragLoadError = 0;
+        level.fragmentError = 0;
         frag.data = new Uint8Array(data.payload);
         stats.parsing.start = stats.buffering.start = self.performance.now();
         stats.parsing.end = stats.buffering.end = self.performance.now();
@@ -511,8 +511,8 @@ export default class BaseStreamController
         part ? ' part: ' + part.index : ''
       } of ${this.logPrefix === '[stream-controller]' ? 'level' : 'track'} ${
         frag.level
-      } (frag:[${(frag.startPTS || NaN).toFixed(3)}-${(
-        frag.endPTS || NaN
+      } (frag:[${(frag.startPTS ?? NaN).toFixed(3)}-${(
+        frag.endPTS ?? NaN
       ).toFixed(3)}] > buffer:${
         media
           ? TimeRanges.toString(BufferHelper.getBuffered(media))
@@ -576,6 +576,7 @@ export default class BaseStreamController
         `frag load aborted, missing level${details ? '' : ' detail'}s`
       );
     }
+
     let keyLoadingPromise: Promise<KeyLoadedData | void> | null = null;
     if (frag.encrypted && !frag.decryptdata?.key) {
       this.log(
@@ -588,11 +589,18 @@ export default class BaseStreamController
       keyLoadingPromise = this.keyLoader.load(frag).then((keyLoadedData) => {
         if (!this.fragContextChanged(keyLoadedData.frag)) {
           this.hls.trigger(Events.KEY_LOADED, keyLoadedData);
+          if (this.state === State.KEY_LOADING) {
+            this.state = State.IDLE;
+          }
           return keyLoadedData;
         }
       });
       this.hls.trigger(Events.KEY_LOADING, { frag });
-      this.throwIfFragContextChanged('KEY_LOADING');
+      if (this.fragCurrent === null) {
+        keyLoadingPromise = Promise.reject(
+          new Error(`frag load aborted, context changed in KEY_LOADING`)
+        );
+      }
     } else if (!frag.encrypted && details.encryptedFragments.length) {
       this.keyLoader.loadClear(frag, details.encryptedFragments);
     }
@@ -620,14 +628,9 @@ export default class BaseStreamController
           );
           this.nextLoadPosition = part.start + part.duration;
           this.state = State.FRAG_LOADING;
-          this.hls.trigger(Events.FRAG_LOADING, {
-            frag,
-            part,
-            targetBufferTime,
-          });
-          this.throwIfFragContextChanged('FRAG_LOADING parts');
+          let result: Promise<PartsLoadedData | FragLoadedData | null>;
           if (keyLoadingPromise) {
-            return keyLoadingPromise
+            result = keyLoadingPromise
               .then((keyLoadedData) => {
                 if (
                   !keyLoadedData ||
@@ -643,14 +646,27 @@ export default class BaseStreamController
                 );
               })
               .catch((error) => this.handleFragLoadError(error));
+          } else {
+            result = this.doFragPartsLoad(
+              frag,
+              part,
+              level,
+              progressCallback
+            ).catch((error: LoadError) => this.handleFragLoadError(error));
           }
-
-          return this.doFragPartsLoad(
+          this.hls.trigger(Events.FRAG_LOADING, {
             frag,
             part,
-            level,
-            progressCallback
-          ).catch((error: LoadError) => this.handleFragLoadError(error));
+            targetBufferTime,
+          });
+          if (this.fragCurrent === null) {
+            return Promise.reject(
+              new Error(
+                `frag load aborted, context changed in FRAG_LOADING parts`
+              )
+            );
+          }
+          return result;
         } else if (
           !frag.url ||
           this.loadedEndOfParts(partList, targetBufferTime)
@@ -673,13 +689,12 @@ export default class BaseStreamController
       this.nextLoadPosition = frag.start + frag.duration;
     }
     this.state = State.FRAG_LOADING;
-    this.hls.trigger(Events.FRAG_LOADING, { frag, targetBufferTime });
-    this.throwIfFragContextChanged('FRAG_LOADING');
 
     // Load key before streaming fragment data
     const dataOnProgress = this.config.progressive;
+    let result: Promise<PartsLoadedData | FragLoadedData | null>;
     if (dataOnProgress && keyLoadingPromise) {
-      return keyLoadingPromise
+      result = keyLoadingPromise
         .then((keyLoadedData) => {
           if (!keyLoadedData || this.fragContextChanged(keyLoadedData?.frag)) {
             return null;
@@ -687,31 +702,31 @@ export default class BaseStreamController
           return this.fragmentLoader.load(frag, progressCallback);
         })
         .catch((error) => this.handleFragLoadError(error));
+    } else {
+      // load unencrypted fragment data with progress event,
+      // or handle fragment result after key and fragment are finished loading
+      result = Promise.all([
+        this.fragmentLoader.load(
+          frag,
+          dataOnProgress ? progressCallback : undefined
+        ),
+        keyLoadingPromise,
+      ])
+        .then(([fragLoadedData]) => {
+          if (!dataOnProgress && fragLoadedData && progressCallback) {
+            progressCallback(fragLoadedData);
+          }
+          return fragLoadedData;
+        })
+        .catch((error) => this.handleFragLoadError(error));
     }
-
-    // load unencrypted fragment data with progress event,
-    // or handle fragment result after key and fragment are finished loading
-    return Promise.all([
-      this.fragmentLoader.load(
-        frag,
-        dataOnProgress ? progressCallback : undefined
-      ),
-      keyLoadingPromise,
-    ])
-      .then(([fragLoadedData]) => {
-        if (!dataOnProgress && fragLoadedData && progressCallback) {
-          progressCallback(fragLoadedData);
-        }
-        return fragLoadedData;
-      })
-      .catch((error) => this.handleFragLoadError(error));
-  }
-
-  private throwIfFragContextChanged(context: string): void | never {
-    // exit if context changed during event loop
+    this.hls.trigger(Events.FRAG_LOADING, { frag, targetBufferTime });
     if (this.fragCurrent === null) {
-      throw new Error(`frag load aborted, context changed in ${context}`);
+      return Promise.reject(
+        new Error(`frag load aborted, context changed in FRAG_LOADING`)
+      );
     }
+    return result;
   }
 
   private doFragPartsLoad(
@@ -764,6 +779,7 @@ export default class BaseStreamController
         type: ErrorTypes.OTHER_ERROR,
         details: ErrorDetails.INTERNAL_EXCEPTION,
         err: error,
+        error,
         fatal: true,
       });
     }
@@ -794,9 +810,9 @@ export default class BaseStreamController
   protected getCurrentContext(
     chunkMeta: ChunkMetadata
   ): { frag: Fragment; part: Part | null; level: Level } | null {
-    const { levels } = this;
+    const { levels, fragCurrent } = this;
     const { level: levelIndex, sn, part: partIndex } = chunkMeta;
-    if (!levels || !levels[levelIndex]) {
+    if (!levels?.[levelIndex]) {
       this.warn(
         `Levels object was unset while buffering fragment ${sn} of level ${levelIndex}. The current chunk will not be buffered.`
       );
@@ -806,9 +822,12 @@ export default class BaseStreamController
     const part = partIndex > -1 ? getPartWith(level, sn, partIndex) : null;
     const frag = part
       ? part.fragment
-      : getFragmentWithSN(level, sn, this.fragCurrent);
+      : getFragmentWithSN(level, sn, fragCurrent);
     if (!frag) {
       return null;
+    }
+    if (fragCurrent && fragCurrent !== frag) {
+      frag.stats = fragCurrent.stats;
     }
     return { frag, part, level };
   }
@@ -830,7 +849,7 @@ export default class BaseStreamController
       buffer = appendUint8Array(data1, data2);
     }
 
-    if (!buffer || !buffer.length) {
+    if (!buffer?.length) {
       return;
     }
 
@@ -1336,68 +1355,73 @@ export default class BaseStreamController
     filterType: PlaylistLevelType,
     data: ErrorData
   ) {
-    if (data.fatal) {
-      this.stopLoad();
-      this.state = State.ERROR;
-      return;
-    }
-    const config = this.config;
-    if (data.chunkMeta) {
-      // Parsing Error: no retries
+    if (data.chunkMeta && !data.frag) {
       const context = this.getCurrentContext(data.chunkMeta);
       if (context) {
         data.frag = context.frag;
-        data.levelRetry = true;
-        this.fragLoadError = config.fragLoadingMaxRetry;
       }
     }
     const frag = data.frag;
     // Handle frag error related to caller's filterType
-    if (!frag || frag.type !== filterType) {
+    if (!frag || frag.type !== filterType || !this.levels) {
       return;
     }
-    const fragCurrent = this.fragCurrent;
-    console.assert(
-      fragCurrent &&
-        frag.sn === fragCurrent.sn &&
-        frag.level === fragCurrent.level &&
-        frag.urlId === fragCurrent.urlId,
-      'Frag load error must match current frag to retry'
-    );
+    if (this.fragContextChanged(frag)) {
+      this.warn(
+        `Frag load error must match current frag to retry ${frag.url} > ${this.fragCurrent?.url}`
+      );
+      return;
+    }
     // keep retrying until the limit will be reached
-    if (this.fragLoadError + 1 <= config.fragLoadingMaxRetry) {
+    const errorAction = data.errorAction;
+    const { action, retryCount = 0, retryConfig } = errorAction || {};
+    if (
+      errorAction &&
+      action === NetworkErrorAction.RetryRequest &&
+      retryConfig
+    ) {
       if (!this.loadedmetadata) {
         this.startFragRequested = false;
         this.nextLoadPosition = this.startPosition;
       }
-      // exponential backoff capped to config.fragLoadingMaxRetryTimeout
-      const delay = Math.min(
-        Math.pow(2, this.fragLoadError) * config.fragLoadingRetryDelay,
-        config.fragLoadingMaxRetryTimeout
-      );
+      const delay = getRetryDelay(retryConfig, retryCount);
       this.warn(
-        `Fragment ${frag.sn} of ${filterType} ${frag.level} failed to load, retrying in ${delay}ms`
+        `Fragment ${frag.sn} of ${filterType} ${frag.level} errored with ${
+          data.details
+        }, retrying loading ${retryCount + 1}/${
+          retryConfig.maxNumRetry
+        } in ${delay}ms`
       );
+      errorAction.resolved = true;
       this.retryDate = self.performance.now() + delay;
-      this.fragLoadError++;
       this.state = State.FRAG_LOADING_WAITING_RETRY;
-    } else if (data.levelRetry) {
-      if (filterType === PlaylistLevelType.AUDIO) {
-        // Reset current fragment since audio track audio is essential and may not have a fail-over track
-        this.fragCurrent = null;
+    } else if (retryConfig && errorAction) {
+      this.resetFragmentErrors(filterType);
+      if (retryCount < retryConfig.maxNumRetry) {
+        // Network retry is skipped when level switch is preferred
+        errorAction.resolved = true;
+      } else {
+        logger.warn(
+          `${data.details} reached or exceeded max retry (${retryCount})`
+        );
       }
-      // Fragment errors that result in a level switch or redundant fail-over
-      // should reset the stream controller state to idle
-      this.fragLoadError = 0;
-      this.state = State.IDLE;
     } else {
-      logger.error(
-        `${data.details} reaches max retry, redispatch as fatal ...`
-      );
-      // switch error to fatal
-      data.fatal = true;
-      this.hls.stopLoad();
       this.state = State.ERROR;
+    }
+  }
+
+  protected resetFragmentErrors(filterType: PlaylistLevelType) {
+    if (filterType === PlaylistLevelType.AUDIO) {
+      // Reset current fragment since audio track audio is essential and may not have a fail-over track
+      this.fragCurrent = null;
+    }
+    // Fragment errors that result in a level switch or redundant fail-over
+    // should reset the stream controller state to idle
+    if (!this.loadedmetadata) {
+      this.startFragRequested = false;
+    }
+    if (this.state !== State.STOPPED) {
+      this.state = State.IDLE;
     }
   }
 
@@ -1453,7 +1477,10 @@ export default class BaseStreamController
     partial: boolean
   ) {
     const details = level.details as LevelDetails;
-    console.assert(!!details, 'level.details must be defined');
+    if (!details) {
+      this.warn('level.details undefined');
+      return;
+    }
     const parsed = Object.keys(frag.elementaryStreams).reduce(
       (result, type) => {
         const info = frag.elementaryStreams[type];
@@ -1493,11 +1520,26 @@ export default class BaseStreamController
       },
       false
     );
-    if (!parsed) {
-      this.warn(
+    if (parsed) {
+      level.fragmentError = 0;
+    } else if (this.transmuxer?.error === null) {
+      const error = new Error(
         `Found no media in fragment ${frag.sn} of level ${level.id} resetting transmuxer to fallback to playlist timing`
       );
+      this.warn(error.message);
+      this.hls.trigger(Events.ERROR, {
+        type: ErrorTypes.MEDIA_ERROR,
+        details: ErrorDetails.FRAG_PARSING_ERROR,
+        fatal: false,
+        error,
+        frag,
+        reason: `Found no media in msn ${frag.sn} of level "${level.url}"`,
+      });
+      if (!this.hls) {
+        return;
+      }
       this.resetTransmuxer();
+      // For this error fallthrough. Marking parsed will allow advancing to next fragment.
     }
     this.state = State.PARSED;
     this.hls.trigger(Events.FRAG_PARSED, { frag, part });
@@ -1507,6 +1549,13 @@ export default class BaseStreamController
     if (this.transmuxer) {
       this.transmuxer.destroy();
       this.transmuxer = null;
+    }
+  }
+
+  protected recoverWorkerError(data: ErrorData) {
+    if (data.event === 'demuxerWorker') {
+      this.resetTransmuxer();
+      this.resetLoadingState();
     }
   }
 
