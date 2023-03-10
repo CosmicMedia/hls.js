@@ -379,6 +379,10 @@ export default class TransmuxerInterface {
   private configureTransmuxer(config: TransmuxConfig) {
     const { worker, transmuxer } = this;
     if (worker) {
+      console.log({
+        cmd: 'configure',
+        config,
+      });
       worker.postMessage({
         cmd: 'configure',
         config,

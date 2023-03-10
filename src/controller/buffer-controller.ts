@@ -27,6 +27,7 @@ import type { ComponentAPI } from '../types/component-api';
 import type { ChunkMetadata } from '../types/transmuxer';
 import type Hls from '../hls';
 import type { LevelDetails } from '../loader/level-details';
+import { toCompatibleCodec } from '../utils/codecs';
 
 const MediaSource = getMediaSource();
 const VIDEO_CODEC_PROFILE_REPACE = /([ha]vc.)(?:\.[^.,]+)+/;
@@ -262,7 +263,9 @@ export default class BufferController implements ComponentAPI {
             '$1'
           );
           if (currentCodec !== nextCodec) {
-            const mimeType = `${container};codecs=${(levelCodec || codec).toLowerCase()}`;
+            const mimeType = `${container};codecs=${toCompatibleCodec(
+              levelCodec || codec
+            )}`;
             this.appendChangeType(trackName, mimeType);
             logger.log(
               `[buffer-controller]: switching codec ${currentCodec} to ${nextCodec}`
@@ -752,7 +755,9 @@ export default class BufferController implements ComponentAPI {
         }
         // use levelCodec as first priority
         const codec = track.levelCodec || track.codec;
-        const mimeType = `${track.container};codecs=${codec?.toLowerCase()}`;
+        const mimeType = `${track.container};codecs=${toCompatibleCodec(
+          codec
+        )}`;
         logger.log(`[buffer-controller]: creating sourceBuffer(${mimeType})`);
         try {
           const sb = (sourceBuffer[trackName] =

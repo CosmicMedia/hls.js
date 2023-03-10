@@ -1,6 +1,9 @@
 // from http://mp4ra.org/codecs.html
 const sampleEntryCodesISO = {
   audio: {
+    fLaC: true, // MP4-RA listed codec entry for FLAC
+    flac: true, // legacy browser codec name for FLAC
+    FLAC: true, // some manifests may list "FLAC" with Apple's tools
     a3ds: true,
     'ac-3': true,
     'ac-4': true,
@@ -73,13 +76,25 @@ const sampleEntryCodesISO = {
 
 export type CodecType = 'audio' | 'video';
 
+const codecsToCheck = ['opus', 'Opus', 'FLAC', 'flac', 'fLaC'];
+
+export function toCompatibleCodec(codecString) {
+  if (codecsToCheck.includes(codecString)) {
+    return codecString.toLowerCase();
+  }
+
+  return codecString;
+}
+
 export function isCodecType(codec: string, type: CodecType): boolean {
   const typeCodes = sampleEntryCodesISO[type];
-  return !!typeCodes && typeCodes[codec.slice(0, 4).toLowerCase()] === true;
+  return (
+    !!typeCodes && typeCodes[toCompatibleCodec(codec.slice(0, 4))] === true
+  );
 }
 
 export function isCodecSupportedInMp4(codec: string, type: CodecType): boolean {
   return MediaSource.isTypeSupported(
-    `${type || 'video'}/mp4;codecs="${codec.toLowerCase()}"`
+    `${type || 'video'}/mp4;codecs="${toCompatibleCodec(codec)}"`
   );
 }

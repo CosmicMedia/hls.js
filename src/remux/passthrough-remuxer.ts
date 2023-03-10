@@ -30,6 +30,7 @@ import type {
 } from '../types/demuxer';
 import type { DecryptData } from '../loader/level-key';
 import type { RationalTimestamp } from '../utils/timescale-conversion';
+import { toCompatibleCodec } from '../utils/codecs';
 
 class PassThroughRemuxer implements Remuxer {
   private emitInitSegment: boolean = false;
@@ -272,6 +273,12 @@ function getParsedTrackCodec(
   }
   if (parsedCodec === 'avc1' || type === ElementaryStreamTypes.VIDEO) {
     return 'avc1.42e01e';
+  }
+  if (toCompatibleCodec(parsedCodec) === 'flac') {
+    return 'flac';
+  }
+  if (toCompatibleCodec(parsedCodec) === 'opus') {
+    return 'opus';
   }
   return 'mp4a.40.5';
 }
